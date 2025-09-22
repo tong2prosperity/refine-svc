@@ -100,7 +100,9 @@ def load_models(args):
     if vocoder_type == 'bigvgan':
         from modules.bigvgan import bigvgan
         bigvgan_name = model_params.vocoder.name
-        bigvgan_model = bigvgan.BigVGAN.from_pretrained(bigvgan_name, use_cuda_kernel=False)
+        # Load from local directory instead of HuggingFace Hub
+        local_bigvgan_path = os.path.join("./models", "bigvgan", bigvgan_name.split("/")[-1])
+        bigvgan_model = bigvgan.BigVGAN.from_pretrained(local_bigvgan_path, use_cuda_kernel=False)
         # remove weight norm in the model and set to eval mode
         bigvgan_model.remove_weight_norm()
         bigvgan_model = bigvgan_model.eval().to(device)
@@ -135,9 +137,11 @@ def load_models(args):
         # whisper
         from transformers import AutoFeatureExtractor, WhisperModel
         whisper_name = model_params.speech_tokenizer.name
-        whisper_model = WhisperModel.from_pretrained(whisper_name, torch_dtype=torch.float16).to(device)
+        # Load from local directory instead of HuggingFace Hub
+        local_whisper_path = os.path.join("./models", "whisper", whisper_name.split("/")[-1])
+        whisper_model = WhisperModel.from_pretrained(local_whisper_path, torch_dtype=torch.float16).to(device)
         del whisper_model.decoder
-        whisper_feature_extractor = AutoFeatureExtractor.from_pretrained(whisper_name)
+        whisper_feature_extractor = AutoFeatureExtractor.from_pretrained(local_whisper_path)
 
         def semantic_fn(waves_16k):
             ori_inputs = whisper_feature_extractor([waves_16k.squeeze(0).cpu().numpy()],
@@ -162,8 +166,10 @@ def load_models(args):
             HubertModel,
         )
         hubert_model_name = config['model_params']['speech_tokenizer']['name']
-        hubert_feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(hubert_model_name)
-        hubert_model = HubertModel.from_pretrained(hubert_model_name)
+        # Load from local directory instead of HuggingFace Hub
+        local_hubert_path = os.path.join("./models", "hubert", hubert_model_name.split("/")[-1])
+        hubert_feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(local_hubert_path)
+        hubert_model = HubertModel.from_pretrained(local_hubert_path)
         hubert_model = hubert_model.to(device)
         hubert_model = hubert_model.eval()
         hubert_model = hubert_model.half()
@@ -191,8 +197,10 @@ def load_models(args):
         )
         model_name = config['model_params']['speech_tokenizer']['name']
         output_layer = config['model_params']['speech_tokenizer']['output_layer']
-        wav2vec_feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(model_name)
-        wav2vec_model = Wav2Vec2Model.from_pretrained(model_name)
+        # Load from local directory instead of HuggingFace Hub
+        local_wav2vec_path = os.path.join("./models", "wav2vec2", model_name.split("/")[-1])
+        wav2vec_feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(local_wav2vec_path)
+        wav2vec_model = Wav2Vec2Model.from_pretrained(local_wav2vec_path)
         wav2vec_model.encoder.layers = wav2vec_model.encoder.layers[:output_layer]
         wav2vec_model = wav2vec_model.to(device)
         wav2vec_model = wav2vec_model.eval()
@@ -245,12 +253,10 @@ def load_models(args):
 def main(args):
     # init xvector models
     if args.xvector_extractor == "wavlm":
-        wavlm_feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(
-            "microsoft/wavlm-base-plus-sv"
-        )
-        wavlm_model = WavLMForXVector.from_pretrained(
-            "microsoft/wavlm-base-plus-sv"
-        ).to(device)
+        # Load from local directory instead of HuggingFace Hub
+        local_wavlm_path = os.path.join("./models", "wavlm", "wavlm-base-plus-sv")
+        wavlm_feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(local_wavlm_path)
+        wavlm_model = WavLMForXVector.from_pretrained(local_wavlm_path).to(device)
     elif args.xvector_extractor == "resemblyzer":
         resemblyzer_encoder = VoiceEncoder()
     elif args.xvector_extractor == 'wavlm-large':
@@ -264,8 +270,10 @@ def main(args):
         raise ValueError(f"Unknown xvector extractor: {args.xvector_extractor}")
 
     # init asr model
-    asr_processor = Wav2Vec2Processor.from_pretrained("facebook/hubert-large-ls960-ft")
-    asr_model = HubertForCTC.from_pretrained("facebook/hubert-large-ls960-ft").to(device)
+    # Load from local directory instead of HuggingFace Hub
+    local_asr_path = os.path.join("./models", "hubert", "hubert-large-ls960-ft")
+    asr_processor = Wav2Vec2Processor.from_pretrained(local_asr_path)
+    asr_model = HubertForCTC.from_pretrained(local_asr_path).to(device)
 
     (
         model,

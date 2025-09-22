@@ -82,9 +82,11 @@ class SeedVCWrapper:
         
         # Load whisper model
         whisper_name = model_params.speech_tokenizer.whisper_name if hasattr(model_params.speech_tokenizer, 'whisper_name') else "openai/whisper-small"
-        self.whisper_model = WhisperModel.from_pretrained(whisper_name, torch_dtype=torch.float16).to(self.device)
+        # Load from local directory instead of HuggingFace Hub
+        local_whisper_path = os.path.join("./models", "whisper", whisper_name.split("/")[-1])
+        self.whisper_model = WhisperModel.from_pretrained(local_whisper_path, torch_dtype=torch.float16).to(self.device)
         del self.whisper_model.decoder
-        self.whisper_feature_extractor = AutoFeatureExtractor.from_pretrained(whisper_name)
+        self.whisper_feature_extractor = AutoFeatureExtractor.from_pretrained(local_whisper_path)
         
     def _load_f0_model(self):
         """Load the F0 conditioned model for voice conversion."""
@@ -132,11 +134,14 @@ class SeedVCWrapper:
         self.campplus_model.to(self.device)
         
         # Load BigVGAN models
-        self.bigvgan_model = bigvgan.BigVGAN.from_pretrained('nvidia/bigvgan_v2_22khz_80band_256x', use_cuda_kernel=False)
+        # Load from local directory instead of HuggingFace Hub
+        local_bigvgan_22k_path = os.path.join("./models", "bigvgan", "v2_22khz_80band_256x")
+        self.bigvgan_model = bigvgan.BigVGAN.from_pretrained(local_bigvgan_22k_path, use_cuda_kernel=False)
         self.bigvgan_model.remove_weight_norm()
         self.bigvgan_model = self.bigvgan_model.eval().to(self.device)
         
-        self.bigvgan_44k_model = bigvgan.BigVGAN.from_pretrained('nvidia/bigvgan_v2_44khz_128band_512x', use_cuda_kernel=False)
+        local_bigvgan_44k_path = os.path.join("./models", "bigvgan", "v2_44khz_128band_512x")
+        self.bigvgan_44k_model = bigvgan.BigVGAN.from_pretrained(local_bigvgan_44k_path, use_cuda_kernel=False)
         self.bigvgan_44k_model.remove_weight_norm()
         self.bigvgan_44k_model = self.bigvgan_44k_model.eval().to(self.device)
         
