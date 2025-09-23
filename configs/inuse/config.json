@@ -1,5 +1,5 @@
 {
-    "reference_audio_path": "C:/Project/ML/audio/seed-vc/examples/reference/azuma_0.wav",
+    "reference_audio_path": "./examples/reference/azuma_0.wav",
     "sg_hostapi": "MME",
     "sg_wasapi_exclusive": true,
     "sg_input_device": "\u9ea6\u514b\u98ce (NVIDIA Broadcast)",
