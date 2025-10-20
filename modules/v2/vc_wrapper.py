@@ -505,7 +505,7 @@ class VoiceConversionWrapper(torch.nn.Module):
             repetition_penalty: float = 1.5,
             convert_style: bool = False,
             anonymization_only: bool = False,
-            device: torch.device = torch.device("cuda"),
+            device: torch.device = torch.device("cuda"), #todo: auto adapt
             dtype: torch.dtype = torch.float16,
             stream_output: bool = True,
     ):

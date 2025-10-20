@@ -11,6 +11,17 @@
             "program": "${file}",
             "console": "integratedTerminal",
             "args": "${command:pickArgs}"
+        },
+        {
+            "name": "Python Debugger: app_vc_v2.py",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal",
+            "env": {
+                "http_proxy": "http://127.0.0.1:7890",
+                "https_proxy": "http://127.0.0.1:7890",
+            }
         }
     ]
 }
