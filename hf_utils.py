@@ -18,6 +18,7 @@ repo_map = {
         "config_filename": None
     },
     "FunAudioLLM/CosyVoice-300M": {
+        "path": hf_cache_dir + "/funaudio-cosyvoice/",
         "model_filename": hf_cache_dir + "/funaudio-cosyvoice/hift.pt",
         "config_filename": None
     }   

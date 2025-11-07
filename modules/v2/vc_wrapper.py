@@ -2,8 +2,10 @@ import torch
 import librosa
 import torchaudio
 import numpy as np
+from contextlib import contextmanager
 from pydub import AudioSegment
 from hf_utils import load_custom_model_from_hf
+import time
 
 DEFAULT_REPO_ID = "Plachta/Seed-VC"
 DEFAULT_CFM_CHECKPOINT = "v2/cfm_small.pth"
@@ -51,6 +53,20 @@ class VoiceConversionWrapper(torch.nn.Module):
         self.dit_max_context_len = 30  # in seconds
         self.ar_max_content_len = 1500  # in num of narrow tokens
         self.compile_len = 87 * self.dit_max_context_len
+
+    def _log_stage_time(self, stage_name: str, start_time: float) -> None:
+        """Print elapsed time for a processing stage in milliseconds."""
+        elapsed_ms = (time.perf_counter() - start_time) * 1000.0
+        print(f"[VoiceConversionWrapper] {stage_name} took {elapsed_ms:.3f} ms")
+
+    @contextmanager
+    def _stage_timer(self, stage_name: str):
+        """Context manager that measures and logs the elapsed time of a stage."""
+        start_time = time.perf_counter()
+        try:
+            yield
+        finally:
+            self._log_stage_time(stage_name, start_time)
 
     def forward_cfm(self, content_indices_wide, content_lens, mels, mel_lens, style_vectors):
         device = content_indices_wide.device
@@ -310,6 +326,7 @@ class VoiceConversionWrapper(torch.nn.Module):
 
     @torch.no_grad()
     def compute_style(self, waves_16k: torch.Tensor, wave_lens_16k: torch.Tensor = None):
+        start_time = time.perf_counter()
         if wave_lens_16k is None:
             wave_lens_16k = torch.tensor([waves_16k.size(-1)], dtype=torch.int32).to(waves_16k.device)
         feat_list = []
@@ -328,6 +345,7 @@ class VoiceConversionWrapper(torch.nn.Module):
         ]
         feat = torch.stack(feat_list, dim=0)
         style = self.style_encoder(feat, feat_lens)
+        self._log_stage_time("Compute style embedding", start_time)
         return style
 
     @torch.no_grad()
@@ -344,47 +362,61 @@ class VoiceConversionWrapper(torch.nn.Module):
             device: torch.device = torch.device("cpu"),
             dtype: torch.dtype = torch.float32,
     ):
-        source_wave = librosa.load(source_audio_path, sr=self.sr)[0]
-        target_wave = librosa.load(target_audio_path, sr=self.sr)[0]
-        source_wave_tensor = torch.tensor(source_wave).unsqueeze(0).to(device)
-        target_wave_tensor = torch.tensor(target_wave).unsqueeze(0).to(device)
+        with self._stage_timer("Load audio"):
+            source_wave = librosa.load(source_audio_path, sr=self.sr)[0]
+            target_wave = librosa.load(target_audio_path, sr=self.sr)[0]
+            source_wave_tensor = torch.tensor(source_wave).unsqueeze(0).to(device)
+            target_wave_tensor = torch.tensor(target_wave).unsqueeze(0).to(device)
 
-        # get 16khz audio
-        source_wave_16k = librosa.resample(source_wave, orig_sr=self.sr, target_sr=16000)
-        target_wave_16k = librosa.resample(target_wave, orig_sr=self.sr, target_sr=16000)
-        source_wave_16k_tensor = torch.tensor(source_wave_16k).unsqueeze(0).to(device)
-        target_wave_16k_tensor = torch.tensor(target_wave_16k).unsqueeze(0).to(device)
+        with self._stage_timer("Resample to 16 kHz"):
+            source_wave_16k = librosa.resample(source_wave, orig_sr=self.sr, target_sr=16000)
+            target_wave_16k = librosa.resample(target_wave, orig_sr=self.sr, target_sr=16000)
+            source_wave_16k_tensor = torch.tensor(source_wave_16k).unsqueeze(0).to(device)
+            target_wave_16k_tensor = torch.tensor(target_wave_16k).unsqueeze(0).to(device)
 
-        # compute mel spectrogram
-        source_mel = self.mel_fn(source_wave_tensor)
-        target_mel = self.mel_fn(target_wave_tensor)
-        source_mel_len = source_mel.size(2)
-        target_mel_len = target_mel.size(2)
+        with self._stage_timer("Compute mel spectrograms"):
+            source_mel = self.mel_fn(source_wave_tensor)
+            target_mel = self.mel_fn(target_wave_tensor)
+            source_mel_len = source_mel.size(2)
+            target_mel_len = target_mel.size(2)
 
+        cat_condition = None
         with torch.autocast(device_type=device.type, dtype=dtype):
             # compute content features
-            _, source_content_indices, _ = self.content_extractor_wide(source_wave_16k_tensor, [source_wave_16k.size])
-            _, target_content_indices, _ = self.content_extractor_wide(target_wave_16k_tensor, [target_wave_16k.size])
-
+            with self._stage_timer("Extract wide content (source)"):
+                _, source_content_indices, _ = self.content_extractor_wide(
+                    source_wave_16k_tensor, [source_wave_16k.size]
+                )
+            with self._stage_timer("Extract wide content (target)"):
+                _, target_content_indices, _ = self.content_extractor_wide(
+                    target_wave_16k_tensor, [target_wave_16k.size]
+                )
             # compute style features
             target_style = self.compute_style(target_wave_16k_tensor)
 
             # Length regulation
-            cond, _ = self.cfm_length_regulator(source_content_indices, ylens=torch.LongTensor([source_mel_len]).to(device))
-            prompt_condition, _, = self.cfm_length_regulator(target_content_indices, ylens=torch.LongTensor([target_mel_len]).to(device))
+            with self._stage_timer("Length regulation"):
+                cond, _ = self.cfm_length_regulator(
+                    source_content_indices, ylens=torch.LongTensor([source_mel_len]).to(device)
+                )
+                prompt_condition, _, = self.cfm_length_regulator(
+                    target_content_indices, ylens=torch.LongTensor([target_mel_len]).to(device)
+                )
+                cat_condition = torch.cat([prompt_condition, cond], dim=1)
 
-            cat_condition = torch.cat([prompt_condition, cond], dim=1)
             # generate mel spectrogram
-            vc_mel = self.cfm.inference(
-                cat_condition,
-                torch.LongTensor([cat_condition.size(1)]).to(device),
-                target_mel, target_style, diffusion_steps,
-                inference_cfg_rate=inference_cfg_rate,
-                sway_sampling=use_sway_sampling,
-                amo_sampling=use_amo_sampling,
-            )
+            with self._stage_timer("CFM inference"):
+                vc_mel = self.cfm.inference(
+                    cat_condition,
+                    torch.LongTensor([cat_condition.size(1)]).to(device),
+                    target_mel, target_style, diffusion_steps,
+                    inference_cfg_rate=inference_cfg_rate,
+                    sway_sampling=use_sway_sampling,
+                    amo_sampling=use_amo_sampling,
+                )
         vc_mel = vc_mel[:, :, target_mel_len:]
-        vc_wave = self.vocoder(vc_mel.float()).squeeze()[None]
+        with self._stage_timer("Vocoder inference"):
+            vc_wave = self.vocoder(vc_mel.float()).squeeze()[None]
         return vc_wave.cpu().numpy()
 
     @torch.no_grad()
@@ -404,63 +436,96 @@ class VoiceConversionWrapper(torch.nn.Module):
             device: torch.device = torch.device("cpu"),
             dtype: torch.dtype = torch.float32,
     ):
-        source_wave = librosa.load(source_audio_path, sr=self.sr)[0]
-        target_wave = librosa.load(target_audio_path, sr=self.sr)[0]
-        source_wave_tensor = torch.tensor(source_wave).unsqueeze(0).to(device)
-        target_wave_tensor = torch.tensor(target_wave).unsqueeze(0).to(device)
+        with self._stage_timer("Load audio"):
+            source_wave = librosa.load(source_audio_path, sr=self.sr)[0]
+            target_wave = librosa.load(target_audio_path, sr=self.sr)[0]
+            source_wave_tensor = torch.tensor(source_wave).unsqueeze(0).to(device)
+            target_wave_tensor = torch.tensor(target_wave).unsqueeze(0).to(device)
 
-        # get 16khz audio
-        source_wave_16k = librosa.resample(source_wave, orig_sr=self.sr, target_sr=16000)
-        target_wave_16k = librosa.resample(target_wave, orig_sr=self.sr, target_sr=16000)
-        source_wave_16k_tensor = torch.tensor(source_wave_16k).unsqueeze(0).to(device)
-        target_wave_16k_tensor = torch.tensor(target_wave_16k).unsqueeze(0).to(device)
+        with self._stage_timer("Resample to 16 kHz"):
+            source_wave_16k = librosa.resample(source_wave, orig_sr=self.sr, target_sr=16000)
+            target_wave_16k = librosa.resample(target_wave, orig_sr=self.sr, target_sr=16000)
+            source_wave_16k_tensor = torch.tensor(source_wave_16k).unsqueeze(0).to(device)
+            target_wave_16k_tensor = torch.tensor(target_wave_16k).unsqueeze(0).to(device)
 
-        # compute mel spectrogram
-        source_mel = self.mel_fn(source_wave_tensor)
-        target_mel = self.mel_fn(target_wave_tensor)
-        source_mel_len = source_mel.size(2)
-        target_mel_len = target_mel.size(2)
+        with self._stage_timer("Compute mel spectrograms"):
+            source_mel = self.mel_fn(source_wave_tensor)
+            target_mel = self.mel_fn(target_wave_tensor)
+            source_mel_len = source_mel.size(2)
+            target_mel_len = target_mel.size(2)
 
+        cat_condition = None
+        cfm_seq_len = None
         with torch.autocast(device_type=device.type, dtype=dtype):
             # compute content features
-            _, source_content_indices, _ = self.content_extractor_wide(source_wave_16k_tensor, [source_wave_16k.size])
-            _, target_content_indices, _ = self.content_extractor_wide(target_wave_16k_tensor, [target_wave_16k.size])
+            with self._stage_timer("Extract wide content (source)"):
+                _, source_content_indices, _ = self.content_extractor_wide(
+                    source_wave_16k_tensor, [source_wave_16k.size]
+                )
+            with self._stage_timer("Extract wide content (target)"):
+                _, target_content_indices, _ = self.content_extractor_wide(
+                    target_wave_16k_tensor, [target_wave_16k.size]
+                )
 
-            _, source_narrow_indices, _ = self.content_extractor_narrow(source_wave_16k_tensor,
-                                                                         [source_wave_16k.size], ssl_model=self.content_extractor_wide.ssl_model)
-            _, target_narrow_indices, _ = self.content_extractor_narrow(target_wave_16k_tensor,
-                                                                         [target_wave_16k.size], ssl_model=self.content_extractor_wide.ssl_model)
+            with self._stage_timer("Extract narrow content (source)"):
+                _, source_narrow_indices, _ = self.content_extractor_narrow(
+                    source_wave_16k_tensor, [source_wave_16k.size], ssl_model=self.content_extractor_wide.ssl_model
+                )
+            with self._stage_timer("Extract narrow content (target)"):
+                _, target_narrow_indices, _ = self.content_extractor_narrow(
+                    target_wave_16k_tensor, [target_wave_16k.size], ssl_model=self.content_extractor_wide.ssl_model
+                )
 
-            src_narrow_reduced, src_narrow_len = self.duration_reduction_func(source_narrow_indices[0], 1)
-            tgt_narrow_reduced, tgt_narrow_len = self.duration_reduction_func(target_narrow_indices[0], 1)
+            with self._stage_timer("Reduce narrow tokens"):
+                src_narrow_reduced, src_narrow_len = self.duration_reduction_func(source_narrow_indices[0], 1)
+                tgt_narrow_reduced, tgt_narrow_len = self.duration_reduction_func(target_narrow_indices[0], 1)
 
-            ar_cond = self.ar_length_regulator(torch.cat([tgt_narrow_reduced, src_narrow_reduced], dim=0)[None])[0]
+            with self._stage_timer("AR length regulation"):
+                ar_cond = self.ar_length_regulator(torch.cat([tgt_narrow_reduced, src_narrow_reduced], dim=0)[None])[0]
 
-            ar_out = self.ar.generate(ar_cond, target_content_indices, top_p=top_p, temperature=temperature, repetition_penalty=repetition_penalty)
-            ar_out_mel_len = torch.LongTensor([int(source_mel_len / source_content_indices.size(-1) * ar_out.size(-1) * length_adjust)]).to(device)
+            with self._stage_timer("AR generate"):
+                ar_out = self.ar.generate(
+                    ar_cond,
+                    target_content_indices,
+                    top_p=top_p,
+                    temperature=temperature,
+                    repetition_penalty=repetition_penalty,
+                )
+            ar_out_mel_len = torch.LongTensor(
+                [int(source_mel_len / source_content_indices.size(-1) * ar_out.size(-1) * length_adjust)]
+            ).to(device)
             # compute style features
             target_style = self.compute_style(target_wave_16k_tensor)
 
             # Length regulation
-            cond, _ = self.cfm_length_regulator(ar_out, ylens=torch.LongTensor([ar_out_mel_len]).to(device))
-            prompt_condition, _, = self.cfm_length_regulator(target_content_indices, ylens=torch.LongTensor([target_mel_len]).to(device))
+            with self._stage_timer("CFM length regulation"):
+                cond, _ = self.cfm_length_regulator(ar_out, ylens=torch.LongTensor([ar_out_mel_len]).to(device))
+                prompt_condition, _, = self.cfm_length_regulator(
+                    target_content_indices, ylens=torch.LongTensor([target_mel_len]).to(device)
+                )
+                cat_condition = torch.cat([prompt_condition, cond], dim=1)
+                cfm_seq_len = cat_condition.size(1)
 
-            cat_condition = torch.cat([prompt_condition, cond], dim=1)
             # generate mel spectrogram
-            vc_mel = self.cfm.inference(
-                cat_condition,
-                torch.LongTensor([cat_condition.size(1)]).to(device),
-                target_mel, target_style, diffusion_steps,
-                inference_cfg_rate=inference_cfg_rate,
-                sway_sampling=use_sway_sampling,
-                amo_sampling=use_amo_sampling,
-            )
+            with self._stage_timer("CFM inference"):
+                vc_mel = self.cfm.inference(
+                    cat_condition,
+                    torch.LongTensor([cfm_seq_len]).to(device),
+                    target_mel,
+                    target_style,
+                    diffusion_steps,
+                    inference_cfg_rate=inference_cfg_rate,
+                    sway_sampling=use_sway_sampling,
+                    amo_sampling=use_amo_sampling,
+                )
         vc_mel = vc_mel[:, :, target_mel_len:]
-        vc_wave = self.vocoder(vc_mel.float()).squeeze()[None]
+        with self._stage_timer("Vocoder inference"):
+            vc_wave = self.vocoder(vc_mel.float()).squeeze()[None]
         return vc_wave.cpu().numpy()
 
     def _process_content_features(self, audio_16k_tensor, is_narrow=False):
         """Process audio through Whisper model to extract features."""
+        start_time = time.perf_counter()
         content_extractor_fn = self.content_extractor_narrow if is_narrow else self.content_extractor_wide
         if audio_16k_tensor.size(-1) <= 16000 * 30:
             # Compute content features
@@ -487,7 +552,8 @@ class VoiceConversionWrapper(torch.nn.Module):
                 buffer = chunk[:, -16000 * overlapping_time:]
                 traversed_time += 30 * 16000 if traversed_time == 0 else chunk.size(-1) - 16000 * overlapping_time
             content_indices = torch.cat(features_list, dim=1)
-
+        stage_name = f"Process content features ({'narrow' if is_narrow else 'wide'})"
+        self._log_stage_time(stage_name, start_time)
         return content_indices
 
     @torch.no_grad()
@@ -505,7 +571,7 @@ class VoiceConversionWrapper(torch.nn.Module):
             repetition_penalty: float = 1.5,
             convert_style: bool = False,
             anonymization_only: bool = False,
-            device: torch.device = torch.device("cuda"), #todo: auto adapt
+            device: torch.device = torch.device("mps"), #todo: auto adapt
             dtype: torch.dtype = torch.float16,
             stream_output: bool = True,
     ):
@@ -530,27 +596,24 @@ class VoiceConversionWrapper(torch.nn.Module):
             If stream_output is True, yields (mp3_bytes, full_audio) tuples
             If stream_output is False, returns the full audio as a numpy array
         """
-        # Load audio
-        source_wave = librosa.load(source_audio_path, sr=self.sr)[0]
-        target_wave = librosa.load(target_audio_path, sr=self.sr)[0]
-        
-        # Limit target audio to 25 seconds
-        target_wave = target_wave[:self.sr * (self.dit_max_context_len - 5)]
-        
-        source_wave_tensor = torch.tensor(source_wave).unsqueeze(0).float().to(device)
-        target_wave_tensor = torch.tensor(target_wave).unsqueeze(0).float().to(device)
+        with self._stage_timer("Load audio"):
+            source_wave = librosa.load(source_audio_path, sr=self.sr)[0]
+            target_wave = librosa.load(target_audio_path, sr=self.sr)[0]
+            target_wave = target_wave[:self.sr * (self.dit_max_context_len - 5)]
+            source_wave_tensor = torch.tensor(source_wave).unsqueeze(0).float().to(device)
+            target_wave_tensor = torch.tensor(target_wave).unsqueeze(0).float().to(device)
 
-        # Resample to 16kHz for feature extraction
-        source_wave_16k = librosa.resample(source_wave, orig_sr=self.sr, target_sr=16000)
-        target_wave_16k = librosa.resample(target_wave, orig_sr=self.sr, target_sr=16000)
-        source_wave_16k_tensor = torch.tensor(source_wave_16k).unsqueeze(0).to(device)
-        target_wave_16k_tensor = torch.tensor(target_wave_16k).unsqueeze(0).to(device)
+        with self._stage_timer("Resample to 16 kHz"):
+            source_wave_16k = librosa.resample(source_wave, orig_sr=self.sr, target_sr=16000)
+            target_wave_16k = librosa.resample(target_wave, orig_sr=self.sr, target_sr=16000)
+            source_wave_16k_tensor = torch.tensor(source_wave_16k).unsqueeze(0).to(device)
+            target_wave_16k_tensor = torch.tensor(target_wave_16k).unsqueeze(0).to(device)
 
-        # Compute mel spectrograms
-        source_mel = self.mel_fn(source_wave_tensor)
-        target_mel = self.mel_fn(target_wave_tensor)
-        source_mel_len = source_mel.size(2)
-        target_mel_len = target_mel.size(2)
+        with self._stage_timer("Compute mel spectrograms"):
+            source_mel = self.mel_fn(source_wave_tensor)
+            target_mel = self.mel_fn(target_wave_tensor)
+            source_mel_len = source_mel.size(2)
+            target_mel_len = target_mel.size(2)
         
         # Set up chunk processing parameters
         max_context_window = self.sr // self.hop_size * self.dit_max_context_len
@@ -562,60 +625,79 @@ class VoiceConversionWrapper(torch.nn.Module):
             target_content_indices = self._process_content_features(target_wave_16k_tensor, is_narrow=False)
             # Compute style features
             target_style = self.compute_style(target_wave_16k_tensor)
-            prompt_condition, _, = self.cfm_length_regulator(target_content_indices,
-                                                             ylens=torch.LongTensor([target_mel_len]).to(device))
+            with self._stage_timer("Prompt length regulation"):
+                prompt_condition, _, = self.cfm_length_regulator(
+                    target_content_indices, ylens=torch.LongTensor([target_mel_len]).to(device)
+                )
 
         # prepare for streaming
         generated_wave_chunks = []
         processed_frames = 0
         previous_chunk = None
+        cond = None
         if convert_style:
             with torch.autocast(device_type=device.type, dtype=dtype):
                 source_narrow_indices = self._process_content_features(source_wave_16k_tensor, is_narrow=True)
                 target_narrow_indices = self._process_content_features(target_wave_16k_tensor, is_narrow=True)
-            src_narrow_reduced, src_narrow_len = self.duration_reduction_func(source_narrow_indices[0], 1)
-            tgt_narrow_reduced, tgt_narrow_len = self.duration_reduction_func(target_narrow_indices[0], 1)
+            with self._stage_timer("Reduce narrow tokens (streaming)"):
+                src_narrow_reduced, src_narrow_len = self.duration_reduction_func(source_narrow_indices[0], 1)
+                tgt_narrow_reduced, tgt_narrow_len = self.duration_reduction_func(target_narrow_indices[0], 1)
             # Process src_narrow_reduced in chunks of max 1000 tokens
             max_chunk_size = self.ar_max_content_len - tgt_narrow_len
 
             # Process src_narrow_reduced in chunks
-            for i in range(0, len(src_narrow_reduced), max_chunk_size):
+            for chunk_idx, i in enumerate(range(0, len(src_narrow_reduced), max_chunk_size)):
                 is_last_chunk = i + max_chunk_size >= len(src_narrow_reduced)
+                vc_mel = None
+                original_len = None
                 with torch.autocast(device_type=device.type, dtype=dtype):
-                    chunk = src_narrow_reduced[i:i + max_chunk_size]
-                    if anonymization_only:
-                        chunk_ar_cond = self.ar_length_regulator(chunk[None])[0]
-                        chunk_ar_out = self.ar.generate(chunk_ar_cond, torch.zeros([1, 0]).long().to(device),
-                                                        compiled_decode_fn=self.compiled_decode_fn,
-                                                      top_p=top_p, temperature=temperature,
-                                                      repetition_penalty=repetition_penalty)
-                    else:
-                        # For each chunk, we need to include tgt_narrow_reduced as context
-                        chunk_ar_cond = self.ar_length_regulator(torch.cat([tgt_narrow_reduced, chunk], dim=0)[None])[0]
-                        chunk_ar_out = self.ar.generate(chunk_ar_cond, target_content_indices, compiled_decode_fn=self.compiled_decode_fn,
-                                                      top_p=top_p, temperature=temperature,
-                                                      repetition_penalty=repetition_penalty)
-                    chunkar_out_mel_len = torch.LongTensor([int(source_mel_len / source_content_indices.size(
-                        -1) * chunk_ar_out.size(-1) * length_adjust)]).to(device)
-                    # Length regulation
-                    chunk_cond, _ = self.cfm_length_regulator(chunk_ar_out, ylens=torch.LongTensor([chunkar_out_mel_len]).to(device))
-                    cat_condition = torch.cat([prompt_condition, chunk_cond], dim=1)
-                    original_len = cat_condition.size(1)
-                    # pad cat_condition to compile_len
-                    if self.dit_compiled:
-                        cat_condition = torch.nn.functional.pad(cat_condition,
-                                                                (0, 0, 0, self.compile_len - cat_condition.size(1),),
-                                                                value=0)
-                    # Voice Conversion
-                    vc_mel = self.cfm.inference(
-                        cat_condition,
-                        torch.LongTensor([original_len]).to(device),
-                        target_mel, target_style, diffusion_steps,
-                        inference_cfg_rate=[intelligebility_cfg_rate, similarity_cfg_rate],
-                        random_voice=anonymization_only,
-                    )
+                    with self._stage_timer(f"Chunk {chunk_idx} AR prepare"):
+                        chunk = src_narrow_reduced[i:i + max_chunk_size]
+                        if anonymization_only:
+                            chunk_ar_cond = self.ar_length_regulator(chunk[None])[0]
+                            chunk_ctx = torch.zeros([1, 0]).long().to(device)
+                        else:
+                            chunk_ar_cond = self.ar_length_regulator(
+                                torch.cat([tgt_narrow_reduced, chunk], dim=0)[None]
+                            )[0]
+                            chunk_ctx = target_content_indices
+                    with self._stage_timer(f"Chunk {chunk_idx} AR generate"):
+                        chunk_ar_out = self.ar.generate(
+                            chunk_ar_cond,
+                            chunk_ctx,
+                            compiled_decode_fn=self.compiled_decode_fn,
+                            top_p=top_p,
+                            temperature=temperature,
+                            repetition_penalty=repetition_penalty,
+                        )
+                    chunkar_out_mel_len = torch.LongTensor(
+                        [int(source_mel_len / source_content_indices.size(-1) * chunk_ar_out.size(-1) * length_adjust)]
+                    ).to(device)
+                    with self._stage_timer(f"Chunk {chunk_idx} CFM length regulation"):
+                        chunk_cond, _ = self.cfm_length_regulator(
+                            chunk_ar_out, ylens=torch.LongTensor([chunkar_out_mel_len]).to(device)
+                        )
+                        cat_condition = torch.cat([prompt_condition, chunk_cond], dim=1)
+                        original_len = cat_condition.size(1)
+                        if self.dit_compiled:
+                            cat_condition = torch.nn.functional.pad(
+                                cat_condition,
+                                (0, 0, 0, self.compile_len - cat_condition.size(1),),
+                                value=0,
+                            )
+                    with self._stage_timer(f"Chunk {chunk_idx} CFM inference"):
+                        vc_mel = self.cfm.inference(
+                            cat_condition,
+                            torch.LongTensor([original_len]).to(device),
+                            target_mel,
+                            target_style,
+                            diffusion_steps,
+                            inference_cfg_rate=[intelligebility_cfg_rate, similarity_cfg_rate],
+                            random_voice=anonymization_only,
+                        )
                     vc_mel = vc_mel[:, :, target_mel_len:original_len]
-                vc_wave = self.vocoder(vc_mel).squeeze()[None]
+                with self._stage_timer(f"Chunk {chunk_idx} Vocoder inference"):
+                    vc_wave = self.vocoder(vc_mel).squeeze()[None]
                 processed_frames, previous_chunk, should_break, mp3_bytes, full_audio = self._stream_wave_chunks(
                     vc_wave, processed_frames, vc_mel, overlap_wave_len,
                     generated_wave_chunks, previous_chunk, is_last_chunk, stream_output
@@ -626,32 +708,41 @@ class VoiceConversionWrapper(torch.nn.Module):
                 if should_break:
                     break
         else:
-            cond, _ = self.cfm_length_regulator(source_content_indices, ylens=torch.LongTensor([source_mel_len]).to(device))
-
+            with self._stage_timer("CFM length regulation (streaming)"):
+                cond, _ = self.cfm_length_regulator(
+                    source_content_indices, ylens=torch.LongTensor([source_mel_len]).to(device)
+                )
             # Process in chunks for streaming
             max_source_window = max_context_window - target_mel.size(2)
 
             # Generate chunk by chunk and stream the output
+            chunk_idx = 0
             while processed_frames < cond.size(1):
-                chunk_cond = cond[:, processed_frames:processed_frames + max_source_window]
-                is_last_chunk = processed_frames + max_source_window >= cond.size(1)
-                cat_condition = torch.cat([prompt_condition, chunk_cond], dim=1)
-                original_len = cat_condition.size(1)
-                # pad cat_condition to compile_len
-                if self.dit_compiled:
-                    cat_condition = torch.nn.functional.pad(cat_condition,
-                                                            (0, 0, 0, self.compile_len - cat_condition.size(1),), value=0)
-                with torch.autocast(device_type=device.type, dtype=torch.float32):  # force CFM to use float32
-                    # Voice Conversion
-                    vc_mel = self.cfm.inference(
-                        cat_condition,
-                        torch.LongTensor([original_len]).to(device),
-                        target_mel, target_style, diffusion_steps,
-                        inference_cfg_rate=[intelligebility_cfg_rate, similarity_cfg_rate],
-                        random_voice=anonymization_only,
-                    )
+                with self._stage_timer(f"Chunk {chunk_idx} Prepare"):
+                    chunk_cond = cond[:, processed_frames:processed_frames + max_source_window]
+                    is_last_chunk = processed_frames + max_source_window >= cond.size(1)
+                    cat_condition = torch.cat([prompt_condition, chunk_cond], dim=1)
+                    original_len = cat_condition.size(1)
+                    if self.dit_compiled:
+                        cat_condition = torch.nn.functional.pad(
+                            cat_condition,
+                            (0, 0, 0, self.compile_len - cat_condition.size(1),),
+                            value=0,
+                        )
+                with torch.autocast(device_type=device.type, dtype=torch.float32):
+                    with self._stage_timer(f"Chunk {chunk_idx} CFM inference"):
+                        vc_mel = self.cfm.inference(
+                            cat_condition,
+                            torch.LongTensor([original_len]).to(device),
+                            target_mel,
+                            target_style,
+                            diffusion_steps,
+                            inference_cfg_rate=[intelligebility_cfg_rate, similarity_cfg_rate],
+                            random_voice=anonymization_only,
+                        )
                 vc_mel = vc_mel[:, :, target_mel_len:original_len]
-                vc_wave = self.vocoder(vc_mel).squeeze()[None]
+                with self._stage_timer(f"Chunk {chunk_idx} Vocoder inference"):
+                    vc_wave = self.vocoder(vc_mel).squeeze()[None]
 
                 processed_frames, previous_chunk, should_break, mp3_bytes, full_audio = self._stream_wave_chunks(
                     vc_wave, processed_frames, vc_mel, overlap_wave_len,
@@ -662,3 +753,4 @@ class VoiceConversionWrapper(torch.nn.Module):
                     yield mp3_bytes, full_audio
                 if should_break:
                     break
+                chunk_idx += 1
