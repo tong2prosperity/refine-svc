@@ -241,18 +241,22 @@ class RealTimeVCSession:
             resampled = torch.cat([pad, resampled], dim=0)
         self.input_wav_res = resampled[-self.input_wav_res.numel() :]
 
-    def _update_vad(self, indata_16k: np.ndarray) -> None:
-        res = self.vad_model.generate(
-            input=indata_16k,
-            cache=self.vad_cache,
-            is_final=False,
-            chunk_size=self.vad_chunk_size,
-        )
-        res_value = res[0]["value"]
-        if len(res_value) % 2 == 1 and not self.vad_speech_detected:
-            self.vad_speech_detected = True
-        elif len(res_value) % 2 == 1 and self.vad_speech_detected:
-            self.set_speech_detected_false_at_end_flag = True
+    def _update_vad(self, indata_16k: np.ndarray = None) -> None:
+        # For debugging purposes, always detect speech
+        self.vad_speech_detected = True
+        self.set_speech_detected_false_at_end_flag = False
+        # Original VAD code for reference
+        # res = self.vad_model.generate(
+        #     input=indata_16k,
+        #     cache=self.vad_cache,
+        #     is_final=False,
+        #     chunk_size=self.vad_chunk_size,
+        # )
+        # res_value = res[0]["value"]
+        # if len(res_value) % 2 == 1 and not self.vad_speech_detected:
+        #     self.vad_speech_detected = True
+        # elif len(res_value) % 2 == 1 and self.vad_speech_detected:
+        #     self.set_speech_detected_false_at_end_flag = True
 
     def _apply_sola(self, infer_wav: torch.Tensor) -> torch.Tensor:
         required_length = self.sola_buffer_frame + self.sola_search_frame
@@ -327,8 +331,8 @@ class RealTimeVCSession:
         output_int16 = (output * 32767.0).astype(np.int16)
         return output_int16.tobytes()
 
-    def _run_inference(self) -> Optional[torch.Tensor]:
-        if not self.vad_speech_detected:
+    def _run_inference(self, force: bool = False) -> Optional[torch.Tensor]:
+        if not force and not self.vad_speech_detected:
             return torch.zeros(
                 self.block_frame, device=self.device, dtype=torch.float32
             )
@@ -364,12 +368,11 @@ class RealTimeVCSession:
 
         flush_output = b""
 
-        # First, process any remaining speech in the buffer
-        if self.vad_speech_detected or self.set_speech_detected_false_at_end_flag:
-            infer_wav = self._run_inference()
-            if infer_wav is not None:
-                infer_wav = infer_wav.clamp_(-1.0, 1.0)
-                flush_output += (infer_wav.cpu().numpy() * 32767.0).astype(np.int16).tobytes()
+        # Process any remaining data in the buffer, bypassing VAD check to ensure all data is processed
+        infer_wav = self._run_inference(force=True)
+        if infer_wav is not None:
+            infer_wav = infer_wav.clamp_(-1.0, 1.0)
+            flush_output += (infer_wav.cpu().numpy() * 32767.0).astype(np.int16).tobytes()
 
         # Now add the remaining content from the SOLA buffer (this contains the end of the audio that would otherwise be lost)
         if self.sola_buffer_has_data and self.sola_buffer.numel() > 0:
