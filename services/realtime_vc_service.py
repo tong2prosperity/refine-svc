@@ -2,6 +2,7 @@ import asyncio
 import importlib.util
 import json
 import logging
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -96,7 +97,10 @@ class RealTimeVCSession:
             self.reference_audio_path, sr=self.model_sr
         )
         self.reference_wav = self.reference_wav.astype(np.float32)
+        self.reference_wav = self.reference_wav.astype(np.float32)
         self._prepare_buffers()
+        self.input_float_buffer = np.array([], dtype=np.float32)
+        self.silence_blocks_remaining: Optional[int] = None
 
     @property
     def output_sample_rate(self) -> int:
@@ -295,6 +299,39 @@ class RealTimeVCSession:
         self.sola_buffer_has_data = True  # Mark that the buffer now contains real audio data
         return infer_wav[: self.block_frame]
 
+    def _process_block(self, tensor: torch.Tensor) -> bytes:
+        # Ensure tensor is on device and correct size
+        tensor = tensor.to(self.device)
+        tensor = self._ensure_block_frame(tensor)
+        
+        self._shift_and_append(tensor)
+        
+        # Update VAD (using resampled 16k audio)
+        # Note: tensor is at stream_sample_rate
+        audio_np = tensor.cpu().numpy()
+        indata_16k = librosa.resample(
+            audio_np,
+            orig_sr=self.stream_sample_rate,
+            target_sr=16000,
+        ).astype(np.float32)
+        self._update_vad(indata_16k)
+        
+        self._update_resampled_buffer()
+        infer_wav = self._run_inference(force=True) # Use force=True to ensure we get output if VAD was triggered previously
+        
+        if infer_wav is None:
+            # Should not happen with force=True usually, unless logic changes
+            return b""
+            
+        if self.set_speech_detected_false_at_end_flag:
+            self.vad_speech_detected = False
+            self.set_speech_detected_false_at_end_flag = False
+            
+        infer_wav = infer_wav.clamp_(-1.0, 1.0)
+        output = infer_wav.cpu().numpy()
+        output_int16 = (output * 32767.0).astype(np.int16)
+        return output_int16.tobytes()
+
     def process_pcm(self, pcm_bytes: bytes) -> Optional[bytes]:
         if not pcm_bytes:
             return None
@@ -302,6 +339,8 @@ class RealTimeVCSession:
         if audio_int16.size == 0:
             return None
         audio_float = audio_int16.astype(np.float32) / 32768.0
+        
+        # Resample to stream_sample_rate if needed
         if self.source_sample_rate != self.stream_sample_rate:
             audio_stream = librosa.resample(
                 audio_float,
@@ -310,26 +349,21 @@ class RealTimeVCSession:
             ).astype(np.float32)
         else:
             audio_stream = audio_float
-        tensor = torch.from_numpy(audio_stream).to(self.device)
-        tensor = self._ensure_block_frame(tensor)
-        self._shift_and_append(tensor)
-        indata_16k = librosa.resample(
-            audio_float,
-            orig_sr=self.source_sample_rate,
-            target_sr=16000,
-        ).astype(np.float32)
-        self._update_vad(indata_16k)
-        self._update_resampled_buffer()
-        infer_wav = self._run_inference()
-        if infer_wav is None:
-            return None
-        if self.set_speech_detected_false_at_end_flag:
-            self.vad_speech_detected = False
-            self.set_speech_detected_false_at_end_flag = False
-        infer_wav = infer_wav.clamp_(-1.0, 1.0)
-        output = infer_wav.cpu().numpy()
-        output_int16 = (output * 32767.0).astype(np.int16)
-        return output_int16.tobytes()
+            
+        # Append to buffer
+        self.input_float_buffer = np.concatenate([self.input_float_buffer, audio_stream])
+        
+        output_bytes = b""
+        
+        # Process full blocks
+        while len(self.input_float_buffer) >= self.block_frame:
+            chunk = self.input_float_buffer[:self.block_frame]
+            self.input_float_buffer = self.input_float_buffer[self.block_frame:]
+            
+            tensor = torch.from_numpy(chunk)
+            output_bytes += self._process_block(tensor)
+            
+        return output_bytes if output_bytes else None
 
     def _run_inference(self, force: bool = False) -> Optional[torch.Tensor]:
         if not force and not self.vad_speech_detected:
@@ -362,30 +396,46 @@ class RealTimeVCSession:
         return self._apply_sola(infer_wav)
 
     def flush(self) -> Optional[bytes]:
-        # If already flushed, return None to prevent infinite loop
+        # If already flushed, return None
         if self._flushed:
             return None
 
         flush_output = b""
 
-        # Process any remaining data in the buffer, bypassing VAD check to ensure all data is processed
-        infer_wav = self._run_inference(force=True)
-        if infer_wav is not None:
-            infer_wav = infer_wav.clamp_(-1.0, 1.0)
-            flush_output += (infer_wav.cpu().numpy() * 32767.0).astype(np.int16).tobytes()
+        # 1. Process remaining data in buffer
+        if len(self.input_float_buffer) > 0:
+            chunk = self.input_float_buffer
+            self.input_float_buffer = np.array([], dtype=np.float32)
+            # _process_block will pad it via _ensure_block_frame
+            tensor = torch.from_numpy(chunk)
+            flush_output += self._process_block(tensor)
+            return flush_output
 
-        # Now add the remaining content from the SOLA buffer (this contains the end of the audio that would otherwise be lost)
+        # 2. Initialize silence flushing if needed
+        if self.silence_blocks_remaining is None:
+            # Calculate how many blocks of silence we need to push to clear the context
+            # extra_time_right is the future context needed
+            self.silence_blocks_remaining = math.ceil(self.config.extra_time_right / self.config.block_time)
+            logger.info(f"Starting flush with {self.silence_blocks_remaining} silence blocks")
+
+        # 3. Push silence blocks
+        if self.silence_blocks_remaining > 0:
+            self.silence_blocks_remaining -= 1
+            zeros = torch.zeros(self.block_frame, dtype=torch.float32)
+            flush_output += self._process_block(zeros)
+            return flush_output
+
+        # 4. Finalize: output SOLA buffer
         if self.sola_buffer_has_data and self.sola_buffer.numel() > 0:
             sola_audio = self.sola_buffer.clamp_(-1.0, 1.0)
             flush_output += (sola_audio.cpu().numpy() * 32767.0).astype(np.int16).tobytes()
 
-        # Clean up session state to ensure proper shutdown
+        # Clean up session state
         self._flushed = True
         self.vad_speech_detected = False
         self.set_speech_detected_false_at_end_flag = False
         self.vad_cache.clear()
 
-        # Return the complete flushed audio if we have any
         return flush_output if flush_output else None
 
 
@@ -470,7 +520,7 @@ async def stream_realtime_conversion(
                 if payload.get("event") == "flush":
                     # Loop until all buffered data is flushed
                     flush_count = 0
-                    max_flush_iterations = 20  # Safety limit to prevent infinite loops
+                    max_flush_iterations = 50  # Safety limit to prevent infinite loops
                     while flush_count < max_flush_iterations:
                         converted = await asyncio.to_thread(session.flush)
                         if converted:
