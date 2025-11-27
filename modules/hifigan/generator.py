@@ -386,8 +386,8 @@ class HiFTGenerator(nn.Module):
         spec = torch.stft(
             x,
             self.istft_params["n_fft"], self.istft_params["hop_len"], self.istft_params["n_fft"], window=self.stft_window.to(x.device),
-            return_complex=True)
-        spec = torch.view_as_real(spec)  # [B, F, TT, 2]
+            return_complex=False)
+        # spec = torch.view_as_real(spec)  # [B, F, TT, 2]
         return spec[..., 0], spec[..., 1]
 
     def _istft(self, magnitude, phase):

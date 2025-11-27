@@ -112,10 +112,14 @@ class CAMLayer(nn.Module):
         return y*m
 
     def seg_pooling(self, x, seg_len=100, stype='avg'):
+        # Always pad to ensure ONNX export traces the padding logic
+        pad_len = (seg_len - (x.size(-1) % seg_len)) % seg_len
+        x_padded = F.pad(x, (0, pad_len))
+
         if stype == 'avg':
-            seg = F.avg_pool1d(x, kernel_size=seg_len, stride=seg_len, ceil_mode=True)
+            seg = F.avg_pool1d(x_padded, kernel_size=seg_len, stride=seg_len, ceil_mode=False)
         elif stype == 'max':
-            seg = F.max_pool1d(x, kernel_size=seg_len, stride=seg_len, ceil_mode=True)
+            seg = F.max_pool1d(x_padded, kernel_size=seg_len, stride=seg_len, ceil_mode=False)
         else:
             raise ValueError('Wrong segment pooling type.')
         shape = seg.shape

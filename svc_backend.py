@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Dict
+import os
+from typing import Dict, Union
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
@@ -10,6 +11,7 @@ from services.realtime_vc_service import (
     RealTimeVCService,
     stream_realtime_conversion,
 )
+from services.refine_onnx import RefineONNXService
 
 app = FastAPI(title="Seed VC V2 Backend", version="0.1.0")
 
@@ -29,14 +31,23 @@ CONFIG_CASTERS: Dict[str, callable] = {
     "extra_time_ce": float,
     "extra_time": float,
     "extra_time_right": float,
+    "pitch_shift": float,
 }
 
 
-def get_service() -> RealTimeVCService:
+def get_service() -> Union[RealTimeVCService, RefineONNXService]:
     service = getattr(app.state, "vc_service", None)
     if service is None:
-        logger.info("Initializing RealTimeVCService and loading models...")
-        app.state.vc_service = RealTimeVCService()
+        use_onnx = os.environ.get("USE_ONNX", "0") == "1"
+        if use_onnx:
+            logger.info("Initializing RefineONNXService and loading models...")
+            # Ensure onnx_models directory exists or is specified correctly
+            onnx_dir = os.environ.get("ONNX_DIR", "onnx_models")
+            app.state.vc_service = RefineONNXService(onnx_dir=onnx_dir)
+        else:
+            logger.info("Initializing RealTimeVCService and loading models...")
+            app.state.vc_service = RealTimeVCService()
+            
         service = app.state.vc_service
         logger.info("Models loaded successfully!")
         logger.info(f"Available voices: {len(service.list_voices())}")
