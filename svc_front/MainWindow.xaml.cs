@@ -9,6 +9,14 @@ namespace SvcClient
 {
     public partial class MainWindow : Window
     {
+        // 常量定义：默认配置值
+        private const string DEFAULT_WORKING_DIR = "..";
+        private const string DEFAULT_BACKEND_SCRIPT = "svc_backend.py";
+        private const string DEFAULT_PYTHON_SCRIPT_PATH = "../svc_backend.py";
+        private const int DEFAULT_SERVICE_PORT = 8105;
+        private const int DEFAULT_STARTUP_TIMEOUT = 30;
+        private const string DEFAULT_PYTHON_EXE = "python.exe";
+
         private PythonServiceManager? _serviceManager;
         private readonly IConfiguration _configuration;
 
@@ -27,27 +35,56 @@ namespace SvcClient
         {
             try
             {
+                // 获取应用程序所在目录（作为基准目录）
+                var baseDirectory = AppDomain.CurrentDomain.BaseDirectory;
+
                 // Read configuration
-                var workingDir = _configuration["PythonService:WorkingDirectory"] ?? "..";
-                var backendScript = _configuration["PythonService:BackendScript"] ?? "svc_backend.py";
-                var servicePort = int.Parse(_configuration["PythonService:ServicePort"] ?? "8105");
-                var startupTimeout = int.Parse(_configuration["PythonService:StartupTimeout"] ?? "30");
-                var pythonExe = _configuration["PythonService:PythonExecutable"] ?? "python.exe";
+                var servicePort = int.Parse(_configuration["PythonService:ServicePort"] ?? DEFAULT_SERVICE_PORT.ToString());
+                var startupTimeout = int.Parse(_configuration["PythonService:StartupTimeout"] ?? DEFAULT_STARTUP_TIMEOUT.ToString());
+                var pythonExe = _configuration["PythonService:PythonExecutable"] ?? DEFAULT_PYTHON_EXE;
                 var venvPaths = _configuration.GetSection("PythonService:VirtualEnvPaths").Get<string[]>() 
                     ?? new[] { "venv", ".venv", "env" };
 
-                // Resolve working directory
-                var fullWorkingDir = Path.GetFullPath(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, workingDir));
+                // 优先使用 PythonScriptRelativePath（相对路径），如果没有则使用 WorkingDirectory + BackendScript
+                string fullScriptPath;
+                string fullWorkingDir;
+                string scriptFileName;
+
+                var scriptRelativePath = _configuration["PythonService:PythonScriptRelativePath"];
+                if (!string.IsNullOrEmpty(scriptRelativePath))
+                {
+                    // 使用相对路径配置（基于当前exe目录）
+                    fullScriptPath = Path.GetFullPath(Path.Combine(baseDirectory, scriptRelativePath));
+                    fullWorkingDir = Path.GetDirectoryName(fullScriptPath) ?? baseDirectory;
+                    scriptFileName = Path.GetFileName(fullScriptPath);
+                    
+                    AddLog($"使用配置的相对路径: {scriptRelativePath}");
+                }
+                else
+                {
+                    // 使用传统的 WorkingDirectory + BackendScript 配置
+                    var workingDir = _configuration["PythonService:WorkingDirectory"] ?? DEFAULT_WORKING_DIR;
+                    scriptFileName = _configuration["PythonService:BackendScript"] ?? DEFAULT_BACKEND_SCRIPT;
+                    fullWorkingDir = Path.GetFullPath(Path.Combine(baseDirectory, workingDir));
+                    fullScriptPath = Path.Combine(fullWorkingDir, scriptFileName);
+                    
+                    AddLog($"使用工作目录配置: {workingDir}");
+                }
+
+
+                // 显示完整脚本路径
+                AddLog($"Python脚本完整路径: {fullScriptPath}");
+                AddLog($"工作目录: {fullWorkingDir}");
 
                 // Update UI
                 PortText.Text = servicePort.ToString();
                 WorkDirText.Text = fullWorkingDir;
-                WorkDirText.ToolTip = fullWorkingDir;
+                WorkDirText.ToolTip = fullScriptPath;
 
                 // Initialize service manager
                 _serviceManager = new PythonServiceManager(
                     fullWorkingDir,
-                    backendScript,
+                    scriptFileName,
                     servicePort,
                     venvPaths,
                     pythonExe,

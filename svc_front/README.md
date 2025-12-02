@@ -79,6 +79,29 @@ dotnet build -c Release
 
 配置文件：`appsettings.json`
 
+### 配置方式一：使用相对路径（推荐）
+
+直接指定Python脚本基于exe所在目录的相对路径：
+
+```json
+{
+  "PythonService": {
+    "PythonScriptRelativePath": "../svc_backend.py",  // 基于exe目录的相对路径
+    "ServicePort": 8105,
+    "StartupTimeout": 30
+  }
+}
+```
+
+**说明**：
+- `../svc_backend.py` 表示exe上一级目录的`svc_backend.py`文件
+- 可以使用任意相对路径，如 `../../other/script.py`
+- 工作目录会自动设置为脚本所在目录
+
+### 配置方式二：使用工作目录+脚本名
+
+分别指定工作目录和脚本文件名：
+
 ```json
 {
   "PythonService": {
@@ -87,23 +110,60 @@ dotnet build -c Release
       ".venv",
       "env"
     ],
-    "PythonExecutable": "python.exe",  // Python可执行文件名
-    "BackendScript": "svc_backend.py", // 后台脚本名称
-    "ServicePort": 8105,               // 服务端口
-    "StartupTimeout": 30,              // 启动超时时间（秒）
-    "WorkingDirectory": ".."           // Python脚本的工作目录（相对于exe路径）
+    "PythonExecutable": "python.exe",
+    "PythonScriptRelativePath": "../svc_backend.py",  // 优先使用
+    "BackendScript": "svc_backend.py",                // 后备选项
+    "ServicePort": 8105,
+    "StartupTimeout": 30,
+    "WorkingDirectory": ".."                          // 后备选项
   }
 }
 ```
 
-### 配置项说明
+### 配置项详解
+
+#### 路径配置（二选一）
+
+- **PythonScriptRelativePath**: （推荐）基于exe目录的Python脚本相对路径
+  - 示例：`"../svc_backend.py"` 表示上一级目录
+  - 示例：`"../../backend/main.py"` 表示上两级目录的backend文件夹
+  - **优先级最高**，如果配置了此项，会忽略下面两项
+
+- **WorkingDirectory** + **BackendScript**: 传统方式
+  - `WorkingDirectory`: Python脚本的工作目录（相对于exe路径）
+  - `BackendScript`: Python脚本的文件名
+  - 只在未配置`PythonScriptRelativePath`时使用
+
+#### 其他配置
 
 - **VirtualEnvPaths**: 虚拟环境目录列表，程序会按顺序查找这些目录
 - **PythonExecutable**: Python可执行文件名（Windows: `python.exe`）
-- **BackendScript**: 后台Python脚本的文件名
 - **ServicePort**: 服务监听的端口号
 - **StartupTimeout**: 等待服务启动的最大时间（秒）
-- **WorkingDirectory**: Python脚本的工作目录，`..` 表示上一级目录
+
+### 配置示例
+
+**示例1：最简配置（使用相对路径）**
+```json
+{
+  "PythonService": {
+    "PythonScriptRelativePath": "../svc_backend.py",
+    "ServicePort": 8105
+  }
+}
+```
+
+**示例2：完整配置**
+```json
+{
+  "PythonService": {
+    "VirtualEnvPaths": ["venv", ".venv"],
+    "PythonScriptRelativePath": "../../project/backend/service.py",
+    "ServicePort": 9000,
+    "StartupTimeout": 60
+  }
+}
+```
 
 ## 工作原理
 
