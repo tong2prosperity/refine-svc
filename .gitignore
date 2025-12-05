@@ -268,3 +268,4 @@ models/
 onnx_models/
 checkpoints/
 temp_cache/
+*.wav

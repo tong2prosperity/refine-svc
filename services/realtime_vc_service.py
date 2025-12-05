@@ -52,7 +52,11 @@ def _load_realtime_gui_module():
 @dataclass
 class RealTimeVCConfig:
     diffusion_steps: int = 10
-    inference_cfg_rate: float = 0.7
+    # V2 parameters: split inference_cfg_rate into two separate rates
+    intelligebility_cfg_rate: float = 0.7
+    similarity_cfg_rate: float = 0.7
+    # Keep old parameter name for backward compatibility
+    inference_cfg_rate: float = 0.7  # Will be used if V2 rates not specified
     max_prompt_length: float = 3.0
     block_time: float = 0.25
     crossfade_time: float = 0.05
@@ -447,23 +451,30 @@ class RealTimeVCService:
         config_path: Optional[str] = None,
         fp16: Optional[bool] = None,
     ) -> None:
+        print("[REALTIME_VC_SERVICE V2] Initializing RealTimeVCService")
         self.module = _load_realtime_gui_module()
         self.device = _select_device()
+        print(f"[REALTIME_VC_SERVICE V2] Using device: {self.device}")
         if fp16 is None:
             fp16 = self.device.type in {"cuda", "mps"}
+        print(f"[REALTIME_VC_SERVICE V2] Using fp16: {fp16}")
         self.module.device = self.device
         args = SimpleNamespace(
             checkpoint_path=checkpoint_path,
             config_path=config_path,
             fp16=fp16,
         )
+        print("[REALTIME_VC_SERVICE V2] Loading realtime GUI models...")
         self.model_set = self.module.load_models(args)
+        print("[REALTIME_VC_SERVICE V2] Models loaded successfully")
         self.file_map = FileMap(voice_root, file_extensions=[".wav", ".mp3", ".flac", ".m4a", ".ogg", ".opus"])
+        print("[REALTIME_VC_SERVICE V2] Loading VAD model...")
         self.vad_model = AutoModel(
             model="fsmn-vad",
             model_revision="v2.0.4",
             disable_update=True,
         )
+        print("[REALTIME_VC_SERVICE V2] Service initialization complete")
 
     def list_voices(self) -> List[Dict[str, str]]:
         return [
@@ -479,9 +490,12 @@ class RealTimeVCService:
     ) -> RealTimeVCSession:
         if voice_id not in self.file_map:
             raise KeyError(f"Unknown voice id: {voice_id}")
+        print(f"[REALTIME_VC_SERVICE V2] Creating session for voice: {voice_id}")
         reference_path = self.file_map[voice_id]
         config = RealTimeVCConfig()
         config.apply_overrides(overrides)
+        print(f"[REALTIME_VC_SERVICE V2] Config - diffusion_steps: {config.diffusion_steps}, "
+              f"intelligebility_cfg: {config.intelligebility_cfg_rate}, similarity_cfg: {config.similarity_cfg_rate}")
         return RealTimeVCSession(
             model_set=self.model_set,
             device=self.device,

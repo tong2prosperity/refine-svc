@@ -46,13 +46,20 @@ def load_v2_models(args):
     return vc_wrapper
 
 
-def convert_voice_v2(source_audio_path, target_audio_path, args):
-    """Convert voice using V2 model"""
+def convert_voice_v2(source_audio_path, target_audio_path, args, stream_to_file=False):
+    """Convert voice using V2 model
+    
+    Args:
+        source_audio_path: Path to source audio file
+        target_audio_path: Path to target audio file
+        args: Arguments containing conversion parameters
+        stream_to_file: If True, save intermediate MP3 chunks during streaming
+    """
     global vc_wrapper_v2
     if vc_wrapper_v2 is None:
         vc_wrapper_v2 = load_v2_models(args)
 
-    # Use the generator function but collect all outputs
+    # Use the generator function for streaming
     generator = vc_wrapper_v2.convert_voice_with_streaming(
         source_audio_path=source_audio_path,
         target_audio_path=target_audio_path,
@@ -67,13 +74,30 @@ def convert_voice_v2(source_audio_path, target_audio_path, args):
         anonymization_only=args.anonymization_only,
         device=device,
         dtype=dtype,
-        stream_output=True
+        stream_output=stream_to_file
     )
 
-    # Collect all outputs from the generator
-    for output in generator:
-        _, full_audio = output
-    return full_audio
+    # Collect outputs from the generator
+    if stream_to_file:
+        # Create stream output directory
+        stream_dir = os.path.join(args.output, "stream_chunks")
+        os.makedirs(stream_dir, exist_ok=True)
+        
+        chunk_idx = 0
+        for mp3_bytes, full_audio in generator:
+            if mp3_bytes is not None:
+                chunk_path = os.path.join(stream_dir, f"chunk_{chunk_idx:04d}.mp3")
+                with open(chunk_path, "wb") as f:
+                    f.write(mp3_bytes)
+                print(f"Saved stream chunk {chunk_idx} to {chunk_path}")
+                chunk_idx += 1
+            if full_audio is not None:
+                return full_audio
+    else:
+        # Non-streaming mode: just get the final result
+        for output in generator:
+            full_audio = output
+        return full_audio
 
 
 def main(args):
@@ -81,7 +105,7 @@ def main(args):
     os.makedirs(args.output, exist_ok=True)
 
     start_time = time.time()
-    converted_audio = convert_voice_v2(args.source, args.target, args)
+    converted_audio = convert_voice_v2(args.source, args.target, args, stream_to_file=args.stream_output)
     end_time = time.time()
 
     if converted_audio is None:
@@ -96,7 +120,11 @@ def main(args):
     filename = f"vc_v2_{source_name}_{target_name}_{args.length_adjust}_{args.diffusion_steps}_{args.similarity_cfg_rate}.wav"
 
     output_path = os.path.join(args.output, filename)
-    save_sr, converted_audio = converted_audio
+    # Handle tuple output from streaming
+    if isinstance(converted_audio, tuple):
+        save_sr, converted_audio = converted_audio
+    else:
+        save_sr = 22050  # Default sample rate
     sf.write(output_path, converted_audio, save_sr)
 
     print(f"Voice conversion completed in {end_time - start_time:.2f} seconds")
@@ -136,9 +164,13 @@ if __name__ == "__main__":
 
     # V2 custom checkpoints
     parser.add_argument("--ar-checkpoint-path", type=str, default=None,
-                        help="Path to custom checkpoint file")
+                        help="Path to custom AR checkpoint file")
     parser.add_argument("--cfm-checkpoint-path", type=str, default=None,
-                        help="Path to custom checkpoint file")
+                        help="Path to custom CFM checkpoint file")
+    
+    # Streaming option
+    parser.add_argument("--stream-output", type=str2bool, default=False,
+                        help="Enable streaming output to save intermediate MP3 chunks")
 
     args = parser.parse_args()
     main(args)

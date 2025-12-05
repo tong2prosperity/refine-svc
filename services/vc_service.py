@@ -31,10 +31,13 @@ def _select_device() -> torch.device:
 class ConversionConfig:
     diffusion_steps: int = 30
     length_adjust: float = 1.0
-    inference_cfg_rate: float = 0.7
+    intelligebility_cfg_rate: float = 0.7
+    similarity_cfg_rate: float = 0.7
     top_p: float = 0.7
     temperature: float = 0.7
     repetition_penalty: float = 1.5
+    convert_style: bool = False
+    anonymization_only: bool = False
     chunk_seconds: float = 2.0
 
 
@@ -61,22 +64,32 @@ class ConversionSession:
         self.chunk_samples = max(int(self.target_sr * self.config.chunk_seconds), self.target_sr // 2)
 
     def _convert_chunk(self, chunk: np.ndarray) -> bytes:
+        print(f"[VC_SERVICE V2] Converting chunk using V2 streaming interface (convert_voice_with_streaming)")
         chunk = np.clip(chunk, -1.0, 1.0)
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
             sf.write(tmp.name, chunk, self.target_sr)
-            converted = self.wrapper.convert_voice(
+            # Use V2 streaming interface with stream_output=False to get final result
+            generator = self.wrapper.convert_voice_with_streaming(
                 source_audio_path=tmp.name,
                 target_audio_path=self.voice.path,
                 diffusion_steps=self.config.diffusion_steps,
                 length_adjust=self.config.length_adjust,
-                inference_cfg_rate=self.config.inference_cfg_rate,
+                intelligebility_cfg_rate=self.config.intelligebility_cfg_rate,
+                similarity_cfg_rate=self.config.similarity_cfg_rate,
                 top_p=self.config.top_p,
                 temperature=self.config.temperature,
                 repetition_penalty=self.config.repetition_penalty,
+                convert_style=self.config.convert_style,
+                anonymization_only=self.config.anonymization_only,
                 device=self.device,
                 dtype=self.dtype,
+                stream_output=False,
             )
-        converted_wave = converted.squeeze().astype(np.float32)
+            # Collect final output from generator
+            converted_wave = None
+            for output in generator:
+                converted_wave = output
+        converted_wave = converted_wave.squeeze().astype(np.float32)
         converted_wave = np.clip(converted_wave, -1.0, 1.0)
         converted_int16 = (converted_wave * 32767.0).astype(np.int16)
         return converted_int16.tobytes()
@@ -137,18 +150,23 @@ class VCService:
         cfm_checkpoint_path: Optional[str],
         compile_ar: bool,
     ):
+        print("[VC_SERVICE V2] Loading V2 wrapper from configs/v2/vc_wrapper.yaml")
         cfg = DictConfig(yaml.safe_load(open("configs/v2/vc_wrapper.yaml", "r")))
         wrapper = instantiate(cfg)
+        print("[VC_SERVICE V2] Loading V2 checkpoints...")
         wrapper.load_checkpoints(ar_checkpoint_path=ar_checkpoint_path, cfm_checkpoint_path=cfm_checkpoint_path)
         wrapper.to(self.device)
         wrapper.eval()
+        print(f"[VC_SERVICE V2] Setting up AR caches on device: {self.device}")
         wrapper.setup_ar_caches(max_batch_size=1, max_seq_len=4096, dtype=self.dtype, device=self.device)
         if compile_ar:
+            print("[VC_SERVICE V2] Compiling AR model...")
             torch._inductor.config.coordinate_descent_tuning = True
             torch._inductor.config.triton.unique_kernel_names = True
             if hasattr(torch._inductor.config, "fx_graph_cache"):
                 torch._inductor.config.fx_graph_cache = True
             wrapper.compile_ar()
+            print("[VC_SERVICE V2] AR model compiled successfully")
         return wrapper
 
     def list_voices(self) -> List[VoiceProfile]:
@@ -160,14 +178,18 @@ class VCService:
         source_sample_rate: int,
         overrides: Optional[Dict[str, float]] = None,
     ) -> ConversionSession:
+        print(f"[VC_SERVICE V2] Creating conversion session for voice: {voice_id}")
         voice = self.voice_library.get(voice_id)
-        config_data: Dict[str, float] = {
+        config_data: Dict = {
             "diffusion_steps": self.config_template.diffusion_steps,
             "length_adjust": self.config_template.length_adjust,
-            "inference_cfg_rate": self.config_template.inference_cfg_rate,
+            "intelligebility_cfg_rate": self.config_template.intelligebility_cfg_rate,
+            "similarity_cfg_rate": self.config_template.similarity_cfg_rate,
             "top_p": self.config_template.top_p,
             "temperature": self.config_template.temperature,
             "repetition_penalty": self.config_template.repetition_penalty,
+            "convert_style": self.config_template.convert_style,
+            "anonymization_only": self.config_template.anonymization_only,
             "chunk_seconds": self.config_template.chunk_seconds,
         }
         if overrides:
