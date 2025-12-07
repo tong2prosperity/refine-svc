@@ -1260,7 +1260,7 @@ if __name__ == "__main__":
             """Create and launch the simple DearPyGUI interface"""
             self.config = Config()
             data = self.load()
-            
+
             # Set default values for GUI config
             self.gui_config.sg_hostapi = data.get("sg_hostapi", self.hostapis[0])
             self.gui_config.sg_input_device = data.get("sg_input_device", self.input_devices[0])
@@ -1277,7 +1277,7 @@ if __name__ == "__main__":
             self.gui_config.extra_time_right = data.get("extra_time_right", 0.02)
 
 
-            
+
             # Create DearPyGUI context
             dpg.create_context()
 
@@ -1308,59 +1308,59 @@ if __name__ == "__main__":
                     # 回退到默认字体
                     default_font = dpg.add_font_registry()
 
-            dpg.create_viewport(title="TiebaoAudio", width=400, height=500)                    
-            
+            dpg.create_viewport(title="TiebaoAudio", width=400, height=500)
+
             # Create main window
             with dpg.window(label="TiebaoAudio", width=400, height=500, tag="main_window"):
                 dpg.add_text("铁宝Audio", pos=[150, 20])
-                
+
                 # Input device selection
                 dpg.add_text("输入设备:", pos=[20, 60])
-                dpg.add_combo(self.input_devices, 
+                dpg.add_combo(self.input_devices,
                             default_value=self.gui_config.sg_input_device,
-                            width=300, pos=[20, 80], 
+                            width=300, pos=[20, 80],
                             tag="input_device_combo",
                             callback=self.on_input_device_change)
-                
+
                 # Output device selection
                 dpg.add_text("输出设备:", pos=[20, 120])
-                dpg.add_combo(self.output_devices, 
+                dpg.add_combo(self.output_devices,
                             default_value=self.gui_config.sg_output_device,
-                            width=300, pos=[20, 140], 
+                            width=300, pos=[20, 140],
                             tag="output_device_combo",
                             callback=self.on_output_device_change)
-                
+
                 # Reference audio selection
                 dpg.add_text("参考音频:", pos=[20, 180])
-                dpg.add_combo(self.file_map.get_filenames(), 
+                dpg.add_combo(self.file_map.get_filenames(),
                             default_value=self.gui_config.reference_audio_path if self.gui_config.reference_audio_path else self.file_map.get_filenames()[0],
-                            width=300, pos=[20, 200], 
+                            width=300, pos=[20, 200],
                             tag="reference_audio_combo",
                             callback=self.on_reference_audio_change)
                 # Start/Stop button
-                dpg.add_button(label="Start", 
-                             width=100, height=40, 
-                             pos=[150, 240], 
+                dpg.add_button(label="Start",
+                             width=100, height=40,
+                             pos=[150, 240],
                              tag="start_stop_btn",
                              callback=self.on_start_stop_click)
-                
+
                 # Status text
                 dpg.add_text("状态: 就绪", pos=[20, 290], tag="status_text")
-            
+
             # Set up DearPyGUI
 
             dpg.setup_dearpygui()
             dpg.show_viewport()
             dpg.set_primary_window("main_window", True)
-            
+
             # Start the GUI loop
             while dpg.is_dearpygui_running():
                 dpg.render_dearpygui_frame()
-            
+
             # Cleanup
             self.stop_stream()
             dpg.destroy_context()
-        
+
         def on_reference_audio_change(self, sender, app_data):
             """Handle reference audio change"""
 
@@ -1397,17 +1397,17 @@ if __name__ == "__main__":
                 torch.mps.empty_cache()
             else:
                 torch.cuda.empty_cache()
-            
+
             # # Use default reference audio if available
-            
+
             if not os.path.exists(self.gui_config.reference_audio_path):
                 print(f"状态: 错误 - 找不到参考音频: {self.gui_config.reference_audio_path}", self.gui_config.reference_audio_path)
                 self.gui_config.reference_audio_path = "./examples/reference/azuma_0.wav"
-            
+
             if not os.path.exists(self.gui_config.reference_audio_path):
                 dpg.set_value("status_text", "状态: 错误 - 找不到参考音频")
                 return False
-                
+
             self.reference_wav, _ = librosa.load(
                 self.gui_config.reference_audio_path, sr=self.model_set[-1]["sampling_rate"]
             )
@@ -1766,10 +1766,10 @@ if __name__ == "__main__":
     parser.add_argument("--config-path", type=str, default=None, help="Path to the vocoder checkpoint")
     parser.add_argument("--fp16", type=str2bool, nargs="?", const=True, help="Whether to use fp16", default=True)
     parser.add_argument("--gpu", type=int, help="Which GPU id to use", default=0)
-    parser.add_argument("--gui", type=str, choices=["simple", "advanced"], default="simple", 
+    parser.add_argument("--gui", type=str, choices=["simple", "advanced"], default="simple",
                        help="Choose GUI interface: 'simple' for DearPyGUI minimal interface, 'advanced' for FreeSimpleGUI full interface")
     args = parser.parse_args()
-    cuda_target = f"cuda:{args.gpu}" if args.gpu else "cuda" 
+    cuda_target = f"cuda:{args.gpu}" if args.gpu else "cuda"
 
     if torch.cuda.is_available():
         device = torch.device(cuda_target)
@@ -1777,7 +1777,7 @@ if __name__ == "__main__":
         device = torch.device("mps")
     else:
         device = torch.device("cpu")
-    
+
     # Choose GUI based on argument
     if args.gui == "simple":
         gui = SimpleGUI(args)

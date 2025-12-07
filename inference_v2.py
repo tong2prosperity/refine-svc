@@ -93,10 +93,18 @@ def convert_voice_v2(source_audio_path, target_audio_path, args, stream_to_file=
                 chunk_idx += 1
             if full_audio is not None:
                 return full_audio
+        return None
     else:
-        # Non-streaming mode: just get the final result
-        for output in generator:
-            full_audio = output
+        # Non-streaming mode: iterate through generator and collect result
+        full_audio = None
+        for item in generator:
+            # In non-streaming mode, _stream_wave_chunks returns numpy array directly
+            if isinstance(item, tuple):
+                # If it's a tuple (mp3_bytes, full_audio), get the full_audio
+                full_audio = item[1] if len(item) > 1 else item[0]
+            else:
+                # If it's just the audio array
+                full_audio = item
         return full_audio
 
 

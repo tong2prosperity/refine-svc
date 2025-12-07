@@ -307,9 +307,9 @@ class RealTimeVCSession:
         # Ensure tensor is on device and correct size
         tensor = tensor.to(self.device)
         tensor = self._ensure_block_frame(tensor)
-        
+
         self._shift_and_append(tensor)
-        
+
         # Update VAD (using resampled 16k audio)
         # Note: tensor is at stream_sample_rate
         audio_np = tensor.cpu().numpy()
@@ -319,18 +319,18 @@ class RealTimeVCSession:
             target_sr=16000,
         ).astype(np.float32)
         self._update_vad(indata_16k)
-        
+
         self._update_resampled_buffer()
         infer_wav = self._run_inference(force=True) # Use force=True to ensure we get output if VAD was triggered previously
-        
+
         if infer_wav is None:
             # Should not happen with force=True usually, unless logic changes
             return b""
-            
+
         if self.set_speech_detected_false_at_end_flag:
             self.vad_speech_detected = False
             self.set_speech_detected_false_at_end_flag = False
-            
+
         infer_wav = infer_wav.clamp_(-1.0, 1.0)
         output = infer_wav.cpu().numpy()
         output_int16 = (output * 32767.0).astype(np.int16)
@@ -343,7 +343,7 @@ class RealTimeVCSession:
         if audio_int16.size == 0:
             return None
         audio_float = audio_int16.astype(np.float32) / 32768.0
-        
+
         # Resample to stream_sample_rate if needed
         if self.source_sample_rate != self.stream_sample_rate:
             audio_stream = librosa.resample(
@@ -353,20 +353,20 @@ class RealTimeVCSession:
             ).astype(np.float32)
         else:
             audio_stream = audio_float
-            
+
         # Append to buffer
         self.input_float_buffer = np.concatenate([self.input_float_buffer, audio_stream])
-        
+
         output_bytes = b""
-        
+
         # Process full blocks
         while len(self.input_float_buffer) >= self.block_frame:
             chunk = self.input_float_buffer[:self.block_frame]
             self.input_float_buffer = self.input_float_buffer[self.block_frame:]
-            
+
             tensor = torch.from_numpy(chunk)
             output_bytes += self._process_block(tensor)
-            
+
         return output_bytes if output_bytes else None
 
     def _run_inference(self, force: bool = False) -> Optional[torch.Tensor]:
