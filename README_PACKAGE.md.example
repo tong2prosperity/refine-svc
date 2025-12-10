@@ -1,0 +1,22 @@
+# SVC 打包说明
+
+## 包含内容
+- Python 3.10 完整环境 (包含 torch 2.4.1, onnx 1.20.0 等所有依赖)
+- SVC 项目代码和模型
+- 一键启动脚本
+
+## 使用方法
+1. 将整个目录复制到目标 Windows PC
+2. 双击 `run_svc.bat` 启动环境
+3. 在打开的命令行中执行相应的命令
+
+## 支持的命令
+- `python inference.py` - 基本推理
+- `python app.py` - 启动 Web 服务
+- `python inference_onnx.py` - ONNX 推理
+- `python real-time-gui.py` - 实时 GUI
+
+## 目标平台
+- Windows 10/11 (AMD/NVIDIA 显卡)
+- 无需额外安装任何依赖
+- CUDA 自动检测（如系统有 NVIDIA 显卡）
