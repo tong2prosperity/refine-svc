@@ -35,7 +35,7 @@ print(f"Created target directory: {TARGET_DIR}")
 def custom_ignore(dir_path, contents):
     ignored = []
     # General ignore files
-    general_ignore_files = ["*.pyc", "*.log", "*.tmp", "pack_svc*.bat", "pack_svc.py", "test_exclude.txt"]
+    general_ignore_files = ["*.pyc", "*.log", "*.tmp", "pack_svc*.bat", "pack_svc.py", "test_exclude.txt", "NUL"]
     # General ignore directories
     general_ignore_dirs = ["__pycache__", ".git", ".idea", ".vscode", PROJECT_NAME, "svc_package"]
     # Specific ignore files for data directory
@@ -91,61 +91,23 @@ try:
     shutil.copytree(".", svc_target, ignore=custom_ignore)
     print("OK: Project files copy completed")
 
-    # Create startup script
-    print("Creating startup script...")
+    # Create startup script by copying template
+    print("Creating startup script from template...")
+
+    # Define paths for template and output
+    template_script_path = os.path.join(os.getcwd(), "template", "run_svc.bat")
     start_script_path = os.path.join(TARGET_DIR, "run_svc.bat")
-    # Use UTF-8 encoding with BOM for full Windows compatibility
-    with open(start_script_path, "wb") as f:
-        f.write(b'\xef\xbb\xbf')  # UTF-8 BOM
-        content = f"""@echo off
-setlocal enabledelayedexpansion
 
-:: Set UTF-8 encoding
-chcp 65001 >nul 2>&1
+    # Check if template exists
+    if not os.path.exists(template_script_path):
+        print(f"ERROR: Template startup script not found at {template_script_path}!")
+        input("Press any key to exit...")
+        sys.exit(1)
 
-:: Set Python path
-set "PYTHON_DIR=%%~dp0python"
-set "PYTHON_EXE=%%PYTHON_DIR%%\\python.exe"
+    # Copy the template
+    shutil.copy2(template_script_path, start_script_path)
 
-:: Verify Python exists
-if not exist "%%PYTHON_EXE%%" (
-    echo Error: Python interpreter not found! Please check if %%PYTHON_DIR%% contains python.exe
-    pause
-    exit /b 1
-)
-
-:: Set environment variables
-set "PYTHON_HOME=%%PYTHON_DIR%%"
-set "PATH=%%PYTHON_HOME%%;%%PYTHON_HOME%%\\Scripts;%%PATH%"
-
-:: Switch to project directory
-set "PROJECT_DIR=%%~dp0svc"
-if not exist "%%PROJECT_DIR%%" (
-    echo Error: Project directory %%PROJECT_DIR%% not found!
-    pause
-    exit /b 1
-)
-cd /d "%%PROJECT_DIR%%"
-
-echo ==============================================
-echo SVC Environment Activated!
-echo Current Python version:
-"%%PYTHON_EXE%%" --version
-echo Current pip version:
-"%%PYTHON_EXE%%" -m pip --version
-echo ==============================================
-echo Available commands:
-echo 1. Inference: "%%PYTHON_EXE%%" inference.py
-echo 2. Web Service: "%%PYTHON_EXE%%" app.py
-echo 3. ONNX Inference: "%%PYTHON_EXE%%" inference_onnx.py
-echo 4. Real-time GUI: "%%PYTHON_EXE%%" real-time-gui.py
-echo ==============================================
-:: Keep window open
-cmd /k
-""".encode('utf-8')
-        f.write(content)
-
-    print("OK: Startup script created")
+    print("OK: Startup script created from template")
 
     # Create README documentation
     print("Creating README documentation...")
